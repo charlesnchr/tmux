@@ -316,6 +316,8 @@ grid_create(u_int sx, u_int sy, u_int hlimit)
 	else
 		gd->linedata = NULL;
 
+	gd->generation = 0;
+
 	return (gd);
 }
 
@@ -328,6 +330,62 @@ grid_destroy(struct grid *gd)
 	free(gd->linedata);
 
 	free(gd);
+}
+
+/* Mark a line as dirty (modified since last render). */
+void
+grid_mark_line_dirty(struct grid *gd, u_int py)
+{
+	struct grid_line	*gl;
+
+	if (py >= gd->hsize + gd->sy)
+		return;
+	gl = &gd->linedata[py];
+	gd->generation++;
+	gl->dirty_generation = gd->generation;
+}
+
+/* Check if a viewport line is dirty and needs redraw. */
+int
+grid_line_is_dirty(struct grid *gd, struct screen *s, u_int py)
+{
+	struct grid_line	*gl;
+
+	if (py >= gd->sy)
+		return (0);
+	if (s->rendered_generations == NULL ||
+	    py >= s->rendered_generations_size)
+		return (1); /* No tracking, assume dirty */
+
+	gl = grid_get_line(gd, gd->hsize + py);
+	return (gl->dirty_generation > s->rendered_generations[py]);
+}
+
+/* Mark a viewport line as clean (rendered). */
+void
+grid_line_mark_clean(struct grid *gd, struct screen *s, u_int py)
+{
+	struct grid_line	*gl;
+
+	if (py >= gd->sy)
+		return;
+	if (s->rendered_generations == NULL ||
+	    py >= s->rendered_generations_size)
+		return;
+
+	gl = grid_get_line(gd, gd->hsize + py);
+	s->rendered_generations[py] = gl->dirty_generation;
+}
+
+/* Mark all lines as dirty (for full redraw). */
+void
+grid_mark_all_dirty(struct grid *gd)
+{
+	u_int	y;
+
+	gd->generation++;
+	for (y = 0; y < gd->hsize + gd->sy; y++)
+		gd->linedata[y].dirty_generation = gd->generation;
 }
 
 /* Compare grids. */
@@ -433,6 +491,9 @@ grid_scroll_history(struct grid *gd, u_int bg)
 	grid_compact_line(&gd->linedata[gd->hsize]);
 	gd->linedata[gd->hsize].time = current_time;
 	gd->hsize++;
+
+	/* Mark new bottom line as dirty. */
+	grid_mark_line_dirty(gd, yy);
 }
 
 /* Clear the history. */
@@ -480,6 +541,9 @@ grid_scroll_history_region(struct grid *gd, u_int upper, u_int lower, u_int bg)
 	/* Move the history offset down over the line. */
 	gd->hscrolled++;
 	gd->hsize++;
+
+	/* Mark the cleared bottom line of the region as dirty. */
+	grid_mark_line_dirty(gd, lower);
 }
 
 /* Expand line to fit to cell. */
@@ -596,6 +660,8 @@ grid_set_cell(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc)
 		grid_extended_cell(gl, gce, gc);
 	else
 		grid_store_cell(gce, gc, gc->data.data[0]);
+
+	grid_mark_line_dirty(gd, py);
 }
 
 /* Set padding at position. */
@@ -632,6 +698,8 @@ grid_set_cells(struct grid *gd, u_int px, u_int py, const struct grid_cell *gc,
 		} else
 			grid_store_cell(gce, gc, s[i]);
 	}
+
+	grid_mark_line_dirty(gd, py);
 }
 
 /* Clear area. */
@@ -671,6 +739,7 @@ grid_clear(struct grid *gd, u_int px, u_int py, u_int nx, u_int ny, u_int bg)
 		grid_expand_line(gd, yy, px + ox, 8); /* default bg first */
 		for (xx = px; xx < px + ox; xx++)
 			grid_clear_cell(gd, xx, yy, bg);
+		grid_mark_line_dirty(gd, yy);
 	}
 }
 
@@ -691,6 +760,7 @@ grid_clear_lines(struct grid *gd, u_int py, u_int ny, u_int bg)
 	for (yy = py; yy < py + ny; yy++) {
 		grid_free_line(gd, yy);
 		grid_empty_line(gd, yy, bg);
+		grid_mark_line_dirty(gd, yy);
 	}
 	if (py != 0)
 		gd->linedata[py - 1].flags &= ~GRID_LINE_WRAPPED;
@@ -736,6 +806,14 @@ grid_move_lines(struct grid *gd, u_int dy, u_int py, u_int ny, u_int bg)
 	}
 	if (py != 0 && (py < dy || py >= dy + ny))
 		gd->linedata[py - 1].flags &= ~GRID_LINE_WRAPPED;
+
+	/* Mark all affected lines as dirty. */
+	for (yy = dy; yy < dy + ny; yy++)
+		grid_mark_line_dirty(gd, yy);
+	for (yy = py; yy < py + ny; yy++) {
+		if (yy < dy || yy >= dy + ny)
+			grid_mark_line_dirty(gd, yy);
+	}
 }
 
 /* Move a group of cells. */
@@ -766,6 +844,8 @@ grid_move_cells(struct grid *gd, u_int dx, u_int px, u_int py, u_int nx,
 			continue;
 		grid_clear_cell(gd, xx, py, bg);
 	}
+
+	grid_mark_line_dirty(gd, py);
 }
 
 /* Get ANSI foreground sequence. */

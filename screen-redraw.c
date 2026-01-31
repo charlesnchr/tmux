@@ -681,6 +681,7 @@ screen_redraw_screen(struct client *c)
 	}
 
 	tty_reset(&c->tty);
+	tty_sync_end(&c->tty);
 }
 
 /* Redraw a single pane and its scrollbar. */
@@ -704,6 +705,7 @@ screen_redraw_pane(struct client *c, struct window_pane *wp,
 		screen_redraw_draw_pane_scrollbar(&ctx, wp);
 
 	tty_reset(&c->tty);
+	tty_sync_end(&c->tty);
 }
 
 /* Get border cell style. */
@@ -942,16 +944,25 @@ screen_redraw_draw_pane(struct screen_redraw_ctx *ctx, struct window_pane *wp)
 	struct window		*w = c->session->curw->window;
 	struct tty		*tty = &c->tty;
 	struct screen		*s = wp->screen;
+	struct grid		*gd = s->grid;
 	struct colour_palette	*palette = &wp->palette;
 	struct grid_cell	 defaults;
 	struct visible_ranges	*r;
 	struct visible_range	*rr;
 	u_int			 i, j, k, top, x, y, width;
+	int			 full_redraw;
 
 	if (wp->base.mode & MODE_SYNC)
 		screen_write_stop_sync(wp);
 
 	log_debug("%s: %s @%u %%%u", __func__, c->name, w->id, wp->id);
+
+	/*
+	 * Check if full redraw is required. Only force full redraw for
+	 * window-level redraws, not pane-level. This allows differential
+	 * rendering based on dirty line tracking.
+	 */
+	full_redraw = (c->flags & CLIENT_REDRAWWINDOW) != 0;
 
 	if (wp->xoff + wp->sx <= ctx->ox || wp->xoff >= ctx->ox + ctx->sx)
 		return;
@@ -962,6 +973,11 @@ screen_redraw_draw_pane(struct screen_redraw_ctx *ctx, struct window_pane *wp)
 	for (j = 0; j < wp->sy; j++) {
 		if (wp->yoff + j < ctx->oy || wp->yoff + j >= ctx->oy + ctx->sy)
 			continue;
+
+		/* Skip clean lines unless full redraw is requested. */
+		if (!full_redraw && !grid_line_is_dirty(gd, s, j))
+			continue;
+
 		y = top + wp->yoff + j - ctx->oy;
 
 		if (wp->xoff >= ctx->ox &&
@@ -1000,6 +1016,9 @@ screen_redraw_draw_pane(struct screen_redraw_ctx *ctx, struct window_pane *wp)
 				    rr->nx, rr->px, y, &defaults, palette);
 			}
 		}
+
+		/* Mark line as clean after rendering. */
+		grid_line_mark_clean(gd, s, j);
 	}
 
 #ifdef ENABLE_SIXEL

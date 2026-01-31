@@ -48,6 +48,10 @@ static void	server_client_check_pane_buffer(struct window_pane *);
 static void	server_client_check_window_resize(struct window *);
 static key_code	server_client_check_mouse(struct client *, struct key_event *);
 static void	server_client_repeat_timer(int, short, void *);
+static void	server_client_render_timer(int, short, void *);
+
+/* Render debounce delay in microseconds (10ms). */
+#define RENDER_DEBOUNCE_US (10 * 1000)
 static void	server_client_click_timer(int, short, void *);
 static void	server_client_check_exit(struct client *);
 static void	server_client_check_redraw(struct client *);
@@ -3059,6 +3063,30 @@ server_client_repeat_timer(__unused int fd, __unused short events, void *data)
 	}
 }
 
+/* Render debounce timer callback. */
+static void
+server_client_render_timer(__unused int fd, __unused short events, void *data)
+{
+	struct client	*c = data;
+
+	c->render_pending = 0;
+	server_client_check_redraw(c);
+}
+
+/* Schedule a debounced render. */
+void
+server_client_schedule_render(struct client *c)
+{
+	struct timeval	tv = { .tv_sec = 0, .tv_usec = RENDER_DEBOUNCE_US };
+
+	if (c->render_pending)
+		return; /* Already scheduled. */
+
+	c->render_pending = 1;
+	evtimer_set(&c->render_timer, server_client_render_timer, c);
+	evtimer_add(&c->render_timer, &tv);
+}
+
 /* Double-click callback. */
 static void
 server_client_click_timer(__unused int fd, __unused short events, void *data)
@@ -3134,14 +3162,6 @@ server_client_check_exit(struct client *c)
 	free(c->exit_message);
 }
 
-/* Redraw timer callback. */
-static void
-server_client_redraw_timer(__unused int fd, __unused short events,
-    __unused void *data)
-{
-	log_debug("redraw timer fired");
-}
-
 /*
  * Check if modes need to be updated. Only modes in the current window are
  * updated and it is done when the status line is redrawn.
@@ -3176,12 +3196,15 @@ server_client_check_redraw(struct client *c)
 	uint64_t		 client_flags = 0;
 	int			 redraw_pane, redraw_scrollbar_only;
 	u_int			 bit = 0;
-	struct timeval		 tv = { .tv_usec = 1000 };
-	static struct event	 ev;
 	size_t			 left;
 
 	if (c->flags & (CLIENT_CONTROL|CLIENT_SUSPENDED))
 		return;
+
+	/* If a debounced render is pending, skip this check. */
+	if (c->render_pending)
+		return;
+
 	if (c->flags & CLIENT_ALLREDRAWFLAGS) {
 		log_debug("%s: redraw%s%s%s%s%s%s", c->name,
 		    (c->flags & CLIENT_REDRAWWINDOW) ? " window" : "",
@@ -3216,12 +3239,7 @@ server_client_check_redraw(struct client *c)
 	}
 	if (needed && (left = EVBUFFER_LENGTH(tty->out)) != 0) {
 		log_debug("%s: redraw deferred (%zu left)", c->name, left);
-		if (!evtimer_initialized(&ev))
-			evtimer_set(&ev, server_client_redraw_timer, NULL);
-		if (!evtimer_pending(&ev, NULL)) {
-			log_debug("redraw timer started");
-			evtimer_add(&ev, &tv);
-		}
+		server_client_schedule_render(c);
 
 		if (~c->flags & CLIENT_REDRAWWINDOW) {
 			TAILQ_FOREACH(wp, &w->panes, entry) {
@@ -3261,8 +3279,24 @@ server_client_check_redraw(struct client *c)
 	if (~c->flags & CLIENT_REDRAWWINDOW) {
 		/*
 		 * If not redrawing the entire window, check whether each pane
-		 * needs to be redrawn.
+		 * needs to be redrawn. Wrap all pane redraws in a single sync
+		 * block to prevent flicker between panes.
 		 */
+		int any_redraw = 0;
+		TAILQ_FOREACH(wp, &w->panes, entry) {
+			if ((wp->flags & PANE_REDRAW) ||
+			    ((c->flags & CLIENT_REDRAWPANES) &&
+			     (c->redraw_panes & (1 << bit))) ||
+			    ((c->flags & CLIENT_REDRAWSCROLLBARS) &&
+			     (c->redraw_scrollbars & (1 << bit)))) {
+				if (!any_redraw) {
+					tty_sync_start(tty);
+					any_redraw = 1;
+				}
+			}
+			bit++;
+		}
+		bit = 0;
 		TAILQ_FOREACH(wp, &w->panes, entry) {
 			redraw_pane = 0;
 			redraw_scrollbar_only = 0;
@@ -3287,6 +3321,8 @@ server_client_check_redraw(struct client *c)
 			}
 			screen_redraw_pane(c, wp, redraw_scrollbar_only);
 		}
+		if (any_redraw)
+			tty_sync_end(tty);
 		c->redraw_panes = 0;
 		c->redraw_scrollbars = 0;
 		c->flags &= ~(CLIENT_REDRAWPANES|CLIENT_REDRAWSCROLLBARS);

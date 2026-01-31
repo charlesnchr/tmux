@@ -1498,13 +1498,21 @@ tty_sync_start(struct tty *tty)
 {
 	if (tty->flags & TTY_BLOCK)
 		return;
-	if (tty->flags & TTY_SYNCING)
-		return;
+
+	/* Reference-counted sync nesting. */
+	tty->sync_level++;
+	if (tty->sync_level > 1)
+		return; /* Already syncing, just increment count. */
+
 	tty->flags |= TTY_SYNCING;
 
-	if (tty_term_has(tty->term, TTYC_SYNC)) {
-		log_debug("%s sync start", tty->client->name);
+	log_debug("%s sync start (level %d)", tty->client->name,
+	    tty->sync_level);
+	if (tty_term_has(tty->term, TTYC_SYNC))
 		tty_putcode_i(tty, TTYC_SYNC, 1);
+	else {
+		/* Fallback: use CSI ?2026h (synchronized update mode) */
+		tty_puts(tty, "\033[?2026h");
 	}
 }
 
@@ -1513,13 +1521,23 @@ tty_sync_end(struct tty *tty)
 {
 	if (tty->flags & TTY_BLOCK)
 		return;
-	if (~tty->flags & TTY_SYNCING)
+	if (tty->sync_level == 0)
 		return;
+
+	/* Reference-counted sync nesting. */
+	tty->sync_level--;
+	if (tty->sync_level > 0)
+		return; /* Still nested, don't end sync yet. */
+
 	tty->flags &= ~TTY_SYNCING;
 
-	if (tty_term_has(tty->term, TTYC_SYNC)) {
-		log_debug("%s sync end", tty->client->name);
+	log_debug("%s sync end (level %d)", tty->client->name,
+	    tty->sync_level);
+	if (tty_term_has(tty->term, TTYC_SYNC))
 		tty_putcode_i(tty, TTYC_SYNC, 2);
+	else {
+		/* Fallback: use CSI ?2026l (end synchronized update) */
+		tty_puts(tty, "\033[?2026l");
 	}
 }
 

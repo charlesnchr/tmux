@@ -97,6 +97,15 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 	s->write_list = NULL;
 	s->hyperlinks = NULL;
 
+	/* Initialize differential rendering tracking. */
+	if (sy != 0) {
+		s->rendered_generations = xcalloc(sy, sizeof *s->rendered_generations);
+		s->rendered_generations_size = sy;
+	} else {
+		s->rendered_generations = NULL;
+		s->rendered_generations_size = 0;
+	}
+
 	screen_reinit(s);
 }
 
@@ -152,6 +161,7 @@ screen_free(struct screen *s)
 	free(s->tabs);
 	free(s->path);
 	free(s->title);
+	free(s->rendered_generations);
 
 	if (s->write_list != NULL)
 		screen_write_free_list(s);
@@ -323,6 +333,21 @@ screen_resize_cursor(struct screen *s, u_int sx, u_int sy, int reflow,
 
 	if (sy != screen_size_y(s))
 		screen_resize_y(s, sy, eat_empty, &cy);
+
+	/* Resize rendered_generations array and mark all dirty. */
+	if (sy != s->rendered_generations_size) {
+		free(s->rendered_generations);
+		if (sy != 0) {
+			s->rendered_generations = xcalloc(sy,
+			    sizeof *s->rendered_generations);
+			s->rendered_generations_size = sy;
+		} else {
+			s->rendered_generations = NULL;
+			s->rendered_generations_size = 0;
+		}
+		/* Mark all lines dirty after resize. */
+		grid_mark_all_dirty(s->grid);
+	}
 
 #ifdef ENABLE_SIXEL
 	image_free_all(s);

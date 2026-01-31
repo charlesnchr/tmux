@@ -830,6 +830,8 @@ struct grid_line {
 
 	int			 flags;
 	time_t			 time;
+
+	uint64_t		 dirty_generation; /* for differential rendering */
 };
 
 /* Entire grid of cells. */
@@ -845,6 +847,8 @@ struct grid {
 	u_int			 hlimit;
 
 	struct grid_line	*linedata;
+
+	uint64_t		 generation; /* dirty tracking generation counter */
 };
 
 /* Virtual cursor in a grid. */
@@ -992,6 +996,10 @@ struct screen {
 	struct screen_write_cline	*write_list;
 
 	struct hyperlinks		*hyperlinks;
+
+	/* Differential rendering: per-line last rendered generation */
+	uint64_t			*rendered_generations;
+	u_int				 rendered_generations_size;
 };
 
 /* Screen write context. */
@@ -1636,6 +1644,8 @@ struct tty {
 	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA)
 	int		 flags;
 
+	int		 sync_level; /* nesting level for synchronized output */
+
 	struct tty_term	*term;
 
 	u_int		 mouse_last_x;
@@ -1980,6 +1990,9 @@ struct client {
 	size_t			 written;
 	size_t			 discarded;
 	size_t			 redraw;
+
+	struct event		 render_timer;
+	int			 render_pending;
 
 	struct event		 repeat_timer;
 
@@ -2937,6 +2950,7 @@ void	 server_client_suspend(struct client *);
 void	 server_client_detach(struct client *, enum msgtype);
 void	 server_client_exec(struct client *, const char *);
 void	 server_client_loop(void);
+void	 server_client_schedule_render(struct client *);
 const char *server_client_get_cwd(struct client *, struct session *);
 void	 server_client_set_flags(struct client *, const char *);
 const char *server_client_get_flags(struct client *);
@@ -3065,6 +3079,10 @@ int	 grid_cells_look_equal(const struct grid_cell *,
 	     const struct grid_cell *);
 struct grid *grid_create(u_int, u_int, u_int);
 void	 grid_destroy(struct grid *);
+void	 grid_mark_line_dirty(struct grid *, u_int);
+int	 grid_line_is_dirty(struct grid *, struct screen *, u_int);
+void	 grid_line_mark_clean(struct grid *, struct screen *, u_int);
+void	 grid_mark_all_dirty(struct grid *);
 int	 grid_compare(struct grid *, struct grid *);
 void	 grid_collect_history(struct grid *, int);
 void	 grid_remove_history(struct grid *, u_int );
